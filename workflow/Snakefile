@@ -23,42 +23,6 @@ rule all:
 
 
 
-if config.get("custom_blast_fasta"):
-    rule build_blast_db:
-        """
-        Builds a BLAST database from a user-provided FASTA file.
-        Set custom_blast_fasta in config.yaml to enable this rule.
-        """
-        input:
-            fasta = config["custom_blast_fasta"]
-        output:
-            nhr = config["blast_db"] + ".nhr",
-            nin = config["blast_db"] + ".nin",
-            nsq = config["blast_db"] + ".nsq",
-        log:
-            "logs/blast/makeblastdb.log"
-        conda:
-            "envs/blast.yaml"
-        params:
-            db_out = config["blast_db"],
-            title  = config.get("blast_db_title", "custom_db"),
-        shell:
-            """
-            makeblastdb \
-                -in            {input.fasta} \
-                -dbtype        nucl \
-                -out           {params.db_out} \
-                -title         "{params.title}" \
-                -parse_seqids \
-                -blastdb_version 5 \
-                2> {log}
-
-            echo "Sequences indexed: $(grep -c '^>' {input.fasta})" >> {log}
-            """
-
-
-
-
 rule raw_stats:
     """
     Statistiques des reads bruts avant tout filtrage.
