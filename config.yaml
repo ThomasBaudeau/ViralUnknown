@@ -1,0 +1,11 @@
+kraken2_db: /home/baudeau/Documents/Suede_KI/k2_minusb
+threads: 16
+flye_memory_gb: 30
+min_quality: 10
+min_read_length_assembly: 500
+mmseqs_min_seq_id: 0.8
+dust_score_threshold: 2
+max_masked_frac: 0.4
+samples:
+  merged:
+    reads: /media/baudeau/KI_DATA/NANOPORE/merged.fastq
