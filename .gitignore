@@ -1,5 +1,6 @@
 .snakemake/
 config.yaml
+references/
 logs/
 results/
 benchmarks/

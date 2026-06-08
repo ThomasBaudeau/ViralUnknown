@@ -3,25 +3,25 @@ SAMPLES = config["samples"]
 
 rule all:
     input:
-        expand("results/dustmasker/{sample}.fastq",                    sample=SAMPLES),
-        expand("results/non_human/{sample}.fastq",                     sample=SAMPLES),
-        expand("results/unclassified/{sample}.fastq",                  sample=SAMPLES),
-        expand("results/metaflye/{sample}/assembly.fasta",             sample=SAMPLES),
-        expand("results/final/metaflye/{sample}_not_mapped.fastq",    sample=SAMPLES),
-        expand("results/final/metaflye/{sample}_short_reads.fastq",   sample=SAMPLES),
-        expand("results/mmseqs/{sample}/clusters_rep_seq.fasta",      sample=SAMPLES),
-        expand("results/kraken2/{sample}.kreport2",                    sample=SAMPLES),
-        expand("results/quality_filter/{sample}_not_mapped_highQ.fastq", sample=SAMPLES),
-        expand("results/quality_filter/{sample}_not_mapped_lowQ.fastq",  sample=SAMPLES),
+        # expand("results/dustmasker/{sample}.fastq",                    sample=SAMPLES),
+        # expand("results/non_human/{sample}.fastq",                     sample=SAMPLES),
+        # expand("results/unclassified/{sample}.fastq",                  sample=SAMPLES),
+        # expand("results/metaflye/{sample}/assembly.fasta",             sample=SAMPLES),
+        # expand("results/final/metaflye/{sample}_not_mapped.fastq",    sample=SAMPLES),
+        # expand("results/final/metaflye/{sample}_short_reads.fastq",   sample=SAMPLES),
+        # expand("results/mmseqs/{sample}/clusters_rep_seq.fasta",      sample=SAMPLES),
+        # expand("results/kraken2/{sample}.kreport2",                    sample=SAMPLES),
+        # expand("results/quality_filter/{sample}_not_mapped_highQ.fastq", sample=SAMPLES),
+        # expand("results/quality_filter/{sample}_not_mapped_lowQ.fastq",  sample=SAMPLES),
         expand("results/fastqc/{sample}_not_mapped_fastqc.html",  sample=SAMPLES),
-        expand("results/stats/{sample}_raw_stats.txt", sample=SAMPLES),
-        # expand("results/blast/{sample}_candidates_filtered.fasta", sample=SAMPLES),
+        # expand("results/stats/{sample}_raw_stats.txt", sample=SAMPLES),
+        expand("results/blast/{sample}_candidates_filtered.fasta", sample=SAMPLES),
         # expand("results/blast/{sample}_candidates_excluded.fasta", sample=SAMPLES),
         # expand("results/blast/{sample}_blast_summary.tsv",         sample=SAMPLES),
         "results/multiqc/multiqc_report.html",
-        "results/report.html"
-
-
+        "results/report.html",
+        "results/mmseqs_blast/clusters_rep_seq.fasta",
+        "results/mmseqs_blast/clusters_summary.tsv",
 
 rule raw_stats:
     """
@@ -30,7 +30,7 @@ rule raw_stats:
     input:
         reads = lambda wc: config["samples"][wc.sample]["reads"]
     output:
-        stats = "results/stats/{sample}_raw_stats.txt"
+        stats = temp("results/stats/{sample}_raw_stats.txt")
     log:
         "logs/stats/{sample}_raw.log"
     conda:
@@ -56,7 +56,7 @@ rule dustmasker_filter:
     input:
         reads=lambda wc: config["samples"][wc.sample]["reads"]
     output:
-        reads="results/dustmasker/{sample}.fastq"
+        reads=temp("results/dustmasker/{sample}.fastq")
     log:
         "logs/dustmasker/{sample}.log"
     conda:
@@ -190,7 +190,7 @@ rule extract_non_human:
         report     = "results/kraken2/{sample}.kreport2",
         reads      = "results/dustmasker/{sample}.fastq",
     output:
-        reads = "results/non_human/{sample}.fastq",
+        reads = temp("results/non_human/{sample}.fastq"),
     log:
         "logs/extract/{sample}.log"
     conda:
@@ -223,7 +223,7 @@ rule extract_unclassified:
         report     = "results/kraken2/{sample}.kreport2",
         reads      = "results/dustmasker/{sample}.fastq",
     output:
-        reads = "results/unclassified/{sample}.fastq",
+        reads = temp("results/unclassified/{sample}.fastq"),
     log:
         "logs/unclassified/{sample}.log"
     conda:
@@ -252,7 +252,7 @@ rule metaflye_assembly:
     input:
         reads = "results/unclassified/{sample}.fastq"
     output:
-        assembly = "results/metaflye/{sample}/assembly.fasta"
+        assembly = temp("results/metaflye/{sample}/assembly.fasta")
     log:
         "logs/metaflye/{sample}.log"
     threads: config.get("threads", 8)
@@ -263,28 +263,42 @@ rule metaflye_assembly:
     shell:
         """
         mkdir -p {params.outdir}
+
+        n_reads=$(grep -c '^@' {input.reads} || true)
+        echo "Input reads : $n_reads" >> {log}
+
+        if [ "$n_reads" -lt 10 ]; then
+            echo "Not enough reads for assembly ($n_reads reads) — skipping" >> {log}
+            touch {output.assembly}
+            exit 0
+        fi
+
         flye \
             --nano-raw {input.reads} \
             --meta \
             --threads {threads} \
             --min-overlap 1000 \
             --out-dir {params.outdir} \
-            > {log} 2>&1
+            >> {log} 2>&1 || true
+
+        # Si Flye a planté ou n'a produit aucun contig
+        if [ ! -f {params.outdir}/assembly.fasta ] || \
+           [ ! -s {params.outdir}/assembly.fasta ]; then
+            echo "Flye produced no contigs — creating empty assembly" >> {log}
+            touch {output.assembly}
+        else
+            echo "Assembly contigs : $(grep -c '^>' {output.assembly})" >> {log}
+        fi
         """
 
-
-# ─────────────────────────────────────────
-# ÉTAPE 5 — Reads non mappés MetaFlye
-#           + séparation longs / courts
-# ─────────────────────────────────────────
 
 rule unmapped_after_metaflye:
     input:
         assembly = "results/metaflye/{sample}/assembly.fasta",
         reads    = "results/unclassified/{sample}.fastq"
     output:
-        not_mapped  = "results/final/metaflye/{sample}_not_mapped.fastq",
-        short_reads = "results/final/metaflye/{sample}_short_reads.fastq",
+        not_mapped  = temp("results/final/metaflye/{sample}_not_mapped.fastq"),
+        short_reads = temp("results/final/metaflye/{sample}_short_reads.fastq"),
     log:
         "logs/metaflye/{sample}_mapping.log"
     threads: config.get("threads", 8)
@@ -296,6 +310,20 @@ rule unmapped_after_metaflye:
         """
         mkdir -p results/final/metaflye
 
+        # Si l'assemblage est vide → tous les reads passent directement
+        if [ ! -s {input.assembly} ]; then
+            echo "Empty assembly — all reads passed as unmapped" >> {log}
+            cp {input.reads} {output.not_mapped}
+            # Reads courts
+            seqkit seq \
+                --max-len {params.min_len} \
+                {output.not_mapped} \
+                -o {output.short_reads} 2>> {log}
+            echo "Unmapped reads (no assembly) : $(grep -c '^@' {output.not_mapped})" >> {log}
+            echo "Short reads (<{params.min_len}bp) : $(grep -c '^@' {output.short_reads})" >> {log}
+            exit 0
+        fi
+
         minimap2 \
             -ax map-ont \
             --secondary=no \
@@ -306,17 +334,15 @@ rule unmapped_after_metaflye:
             > {output.not_mapped} \
             2> {log}
 
-        echo "Reads non mappés : $(grep -c '^@' {output.not_mapped})" >> {log}
+        echo "Unmapped reads : $(grep -c '^@' {output.not_mapped})" >> {log}
 
-        # Garder les courts de côté
         seqkit seq \
             --max-len {params.min_len} \
             {output.not_mapped} \
             -o {output.short_reads} 2>> {log}
 
-        echo "Reads courts (<{params.min_len}bp) : $(grep -c '^@' {output.short_reads})" >> {log}
+        echo "Short reads (<{params.min_len}bp) : $(grep -c '^@' {output.short_reads})" >> {log}
         """
-
 
 
 
@@ -330,8 +356,8 @@ rule filter_low_quality:
     input:
         reads = "results/final/metaflye/{sample}_not_mapped.fastq"
     output:
-        high_qual = "results/quality_filter/{sample}_not_mapped_highQ.fastq",
-        low_qual  = "results/quality_filter/{sample}_not_mapped_lowQ.fastq",
+        high_qual = temp("results/quality_filter/{sample}_not_mapped_highQ.fastq"),
+        low_qual  = temp("results/quality_filter/{sample}_not_mapped_lowQ.fastq"),
     log:
         "logs/quality_filter/{sample}.log"
     conda:
@@ -373,9 +399,9 @@ rule mmseqs_cluster:
     input:
         reads = "results/quality_filter/{sample}_not_mapped_highQ.fastq",
     output:
-        rep_seq = "results/mmseqs/{sample}/clusters_rep_seq.fasta",
-        tsv     = "results/mmseqs/{sample}/clusters_cluster.tsv",
-        summary = "results/mmseqs/{sample}/clusters_summary.tsv",
+        rep_seq = temp("results/mmseqs/{sample}/clusters_rep_seq.fasta"),
+        tsv     = temp("results/mmseqs/{sample}/clusters_cluster.tsv"),
+        summary ="results/mmseqs/{sample}/clusters_summary.tsv",
     log:
         "logs/mmseqs/{sample}.log"
     threads: config.get("threads", 8)
@@ -497,6 +523,260 @@ rule multiqc:
 # ÉTAPE 8 — MultiQC
 # ─────────────────────────────────────────
 
+
+
+rule merge_assembly_clusters:
+    """
+    Merge MetaFlye contigs + MMseqs representatives.
+    - MetaFlye IDs  : >assembly_<originalID>
+    - MMseqs IDs    : >cluster_<nbReadsInCluster>_<representativeID>
+    """
+    input:
+        assembly = "results/metaflye/{sample}/assembly.fasta",
+        clusters = "results/mmseqs/{sample}/clusters_rep_seq.fasta",
+        summary  = "results/mmseqs/{sample}/clusters_summary.tsv",
+    output:
+        merged = temp("results/blast_input/{sample}_candidates.fasta"),
+    log:
+        "logs/blast_input/{sample}.log"
+    conda:
+        "envs/mmseqs2.yaml"
+    script:
+        "scripts/merge_fasta.py"
+
+
+rule blast_candidates:
+    input:
+        fasta = "results/blast_input/{sample}_candidates.fasta",
+        nhr   = config["blast_db"] + ".nhr",
+    output:
+        results = temp("results/blast/{sample}_blast_results.tsv"),
+    log:
+        "logs/blast/{sample}.log"
+    threads: config.get("threads", 8)
+    conda:
+        "envs/blast.yaml"
+    params:
+        blast_db        = config["blast_db"],
+        blast_db_dir    = str(Path(config["blast_db"]).parent),
+        evalue          = config.get("blast_evalue", "1e-5"),
+        max_target_seqs = config.get("blast_max_hits", 5),
+    shell:
+        r"""
+        mkdir -p results/blast
+
+        export BLASTDB={params.blast_db_dir}
+
+        blastn \
+            -query {input.fasta} \
+            -db {params.blast_db} \
+            -out {output.results} \
+            -outfmt "6 qseqid sseqid pident qcovs length evalue bitscore stitle" \
+            -evalue {params.evalue} \
+            -max_target_seqs {params.max_target_seqs} \
+            -num_threads {threads} \
+            2> {log}
+
+        echo "BLAST hits : $(wc -l < {output.results})" >> {log}
+        """
+
+rule filter_blast_candidates:
+    input:
+        fasta = "results/blast_input/{sample}_candidates.fasta",
+        blast = "results/blast/{sample}_blast_results.tsv",
+    output:
+        report = temp("results/blast/{sample}_blast_summary.tsv"),
+    log:
+        "logs/blast/{sample}_filter.log"
+    conda:
+        "envs/mmseqs2.yaml"
+    params:
+        min_pident = 80,
+        min_qcov   = 80,
+    shell:
+        """
+        mkdir -p results/blast
+
+        ALL_IDS=/tmp/{wildcards.sample}_all_ids.txt
+        BEST_HITS=/tmp/{wildcards.sample}_best_hits.tsv
+
+        # ---------- All FASTA IDs ----------
+        grep '^>' {input.fasta} \
+                | sed 's/^>//' \
+                | awk '{{print $1}}' \
+                | sort -u \
+                > $ALL_IDS
+
+        echo "FASTA sequences uniques : $(wc -l < $ALL_IDS)" > {log}
+        echo "BLAST lignes totales    : $(wc -l < {input.blast})" >> {log}
+
+        # ---------- Meilleur hit unique par query ----------
+        # Pour chaque query, on garde la ligne avec le meilleur score combiné pident+qcov
+        awk -F '\\t' '
+            {{
+                q = $1
+                score = $3 + $4
+                if (score > best_score[q]) {{
+                    best_score[q] = score
+                    best_line[q]  = $0
+                }}
+            }}
+            END {{
+                for (q in best_line)
+                    print best_line[q]
+            }}
+        ' {input.blast} | sort -k1,1 > $BEST_HITS
+
+        echo "Queries uniques dans BLAST : $(wc -l < $BEST_HITS)" >> {log}
+
+        # ---------- Report ----------
+        printf "qseqid\\tstatus\\tpident\\tqcov\\tbest_hit\\n" > {output.report}
+
+        # Reads avec hit → statut selon seuils
+        awk -F '\\t' -v pident={params.min_pident} -v qcov={params.min_qcov} '
+            BEGIN {{ OFS="\\t" }}
+            {{
+                if ($3 >= pident && $4 >= qcov)
+                    status = "excluded"
+                else
+                    status = "kept_bad_hit"
+                print $1, status, $3, $4, $2
+            }}
+        ' $BEST_HITS >> {output.report}
+
+        # Reads absents du BLAST → no_hit
+        comm -23 $ALL_IDS <(awk '{{print $1}}' $BEST_HITS | sort -u) \
+            | awk 'BEGIN{{OFS="\\t"}} {{print $1, "kept_no_hit", 0, 0, "."}}' \
+            >> {output.report}
+
+        echo "Excluded    : $(grep -c "excluded"     {output.report} || true)" >> {log}
+        echo "Bad hit     : $(grep -c "kept_bad_hit" {output.report} || true)" >> {log}
+        echo "No hit      : $(grep -c "kept_no_hit"  {output.report} || true)" >> {log}
+        echo "Total lignes summary (sans header) : $(tail -n +2 {output.report} | wc -l)" >> {log}
+
+        rm -f $ALL_IDS $BEST_HITS
+        """
+
+rule blast_fasta:
+    input:
+        fasta   = "results/blast_input/{sample}_candidates.fasta",
+        blast   = "results/blast/{sample}_blast_summary.tsv",
+    output:
+        filtered = "results/blast/{sample}_candidates_filtered.fasta",
+        excluded = "results/blast/{sample}_candidates_excluded.fasta",
+    log:
+        "logs/blast/{sample}_filter.log"
+    conda:
+        "envs/mmseqs2.yaml"
+    script:
+        "scripts/blast_fasta.py"
+
+
+rule merge_blast_filterd:
+    input:
+        filtered = expand("results/blast/{sample}_candidates_filtered.fasta", sample=SAMPLES)
+    output:
+        merged = "results/blast/all_merged_blast.fasta",
+    log:
+        "logs/blast/merge_filtered.log"
+    conda:
+       "envs/mmseqs2.yaml"
+    shell:
+        """
+        mkdir -p results/blast
+
+        # Merger tous les FASTA en préfixant les IDs par le nom du sample
+        for fasta in {input.filtered}; do
+            sample=$(basename "$fasta" _candidates_filtered.fasta)
+            seqkit replace \
+                -p "^" \
+                -r "${{sample}}__" \
+                "$fasta" \
+                2>> {log}
+        done > {output.merged}
+
+        echo "Total sequences merged : $(grep -c '^>' {output.merged})" >> {log}
+        """
+
+rule mmseqs_blast_cluster:
+    input:
+        reads = "results/blast/all_merged_blast.fasta",
+    output:
+        rep_seq = "results/mmseqs_blast/clusters_rep_seq.fasta",
+        tsv     = temp("results/mmseqs_blast/clusters_cluster.tsv"),
+        summary = "results/mmseqs_blast/clusters_summary.tsv",
+    log:
+        "logs/mmseqs_blast/blast.log"
+    threads: config.get("threads", 8)
+    conda:
+        "envs/mmseqs2.yaml"
+    params:
+        min_seq_id = config.get("mmseqs_min_seq_id", 0.80),
+        outdir     = "results/mmseqs_blast/",
+        tmpdir     = "/tmp/mmseqs_blast"
+    shell:
+        """
+        mkdir -p {params.outdir} {params.tmpdir}
+
+        n_reads=$(grep -c "^>" {input.reads} || true)
+        echo "Reads à clusteriser : $n_reads" >> {log}
+
+        if [ "$n_reads" -lt 2 ]; then
+            echo "Pas assez de reads" >> {log}
+            touch {output.rep_seq} {output.tsv} {output.summary}
+            exit 0
+        fi
+
+        seqkit fq2fa {input.reads} \
+            > {params.tmpdir}/reads.fasta 2>> {log}
+
+        mmseqs easy-cluster \
+            {params.tmpdir}/reads.fasta \
+            {params.outdir}/clusters \
+            {params.tmpdir} \
+            --min-seq-id {params.min_seq_id} \
+            --threads {threads} \
+            --cov-mode 1 \
+            -c 0.8 \
+            2>> {log}
+
+        # Extraire les représentants si non générés
+        if [ ! -s {output.rep_seq} ]; then
+            awk '{{print $1}}' {output.tsv} | \
+                sort -u > {params.tmpdir}/rep_ids.txt
+            seqkit grep \
+                -f {params.tmpdir}/rep_ids.txt \
+                {params.outdir}/clusters_all_seqs.fasta | \
+            seqkit rmdup \
+                -o {output.rep_seq}
+        fi
+
+        # Générer le fichier résumé :
+        # representant | nb_membres | ids_membres
+        awk '
+            BEGIN {{
+                OFS = "\t"
+                print "representant", "nb_membres", "membres"
+            }}
+            {{
+                rep = $1
+                member = $2
+                members[rep] = members[rep] (members[rep] ? "," : "") member
+                count[rep]++
+            }}
+            END {{
+                for (rep in count)
+                    print rep, count[rep], members[rep]
+            }}
+        ' {output.tsv} | sort -t$'\t' -k2 -rn \
+            > {output.summary}
+
+        echo "Clusters : $(tail -n +2 {output.summary} | wc -l)" >> {log}
+        echo "Représentants extraits : $(grep -c '^>' {output.rep_seq})" >> {log}
+
+        rm -rf {params.tmpdir}
+        """
+
 rule generate_report:
     input:
         expand("results/mmseqs/{sample}/clusters_rep_seq.fasta", sample=SAMPLES),
@@ -512,166 +792,3 @@ rule generate_report:
             --output {output} \
             2> {log}
         """
-
-rule merge_assembly_clusters:
-    """
-    Merges metaFlye assembly contigs and MMseqs2 cluster
-    representatives into a single FASTA file for BLAST.
-    """
-    input:
-        assembly = "results/metaflye/{sample}/assembly.fasta",
-        clusters = "results/mmseqs/{sample}/clusters_rep_seq.fasta",
-    output:
-        merged = "results/blast_input/{sample}_candidates.fasta",
-    log:
-        "logs/blast_input/{sample}.log"
-    conda:
-        "envs/seqkit.yaml"
-    shell:
-        """
-        mkdir -p results/blast_input
-
-        # Préfixer les IDs pour distinguer l'origine
-        seqkit replace \
-            -p "^" \
-            -r "assembly_{wildcards.sample}__" \
-            {input.assembly} \
-            2>> {log} > results/blast_input/{wildcards.sample}_assembly_prefixed.fasta
-
-        seqkit replace \
-            -p "^" \
-            -r "cluster_{wildcards.sample}__" \
-            {input.clusters} \
-            2>> {log} > results/blast_input/{wildcards.sample}_clusters_prefixed.fasta
-
-        # Fusionner et dédupliquer
-        cat \
-            results/blast_input/{wildcards.sample}_assembly_prefixed.fasta \
-            results/blast_input/{wildcards.sample}_clusters_prefixed.fasta | \
-        seqkit rmdup \
-            -o {output.merged} \
-            2>> {log}
-
-        # Nettoyer les fichiers temporaires
-        rm -f results/blast_input/{wildcards.sample}_assembly_prefixed.fasta \
-              results/blast_input/{wildcards.sample}_clusters_prefixed.fasta
-
-        echo "Assembly contigs  : $(grep -c '^>' {input.assembly})"  >> {log}
-        echo "Cluster reps      : $(grep -c '^>' {input.clusters})"  >> {log}
-        echo "Total merged      : $(grep -c '^>' {output.merged})"   >> {log}
-        """
-
-
-# rule blast_candidates:
-#     """
-#     BLASTn candidates against nt database.
-#     Keeps only sequences that either:
-#     - have no hit at all
-#     - OR have no hit with pident >= 80% AND query coverage >= 50%
-#     Removes sequences with strong known hits.
-#     """
-#     input:
-#         fasta = "results/blast_input/{sample}_candidates.fasta",
-#         db    = config["blast_db"] + ".nhr", 
-#     output:
-#         results  = "results/blast/{sample}_blast_results.txt",
-#         report   = "results/blast/{sample}_blast_summary.tsv",
-#         filtered = "results/blast/{sample}_candidates_filtered.fasta",
-#         excluded = "results/blast/{sample}_candidates_excluded.fasta",
-#     log:
-#         "logs/blast/{sample}.log"
-#     threads: config.get("threads", 8)
-#     conda:
-#         "envs/blast.yaml"
-#     params:
-#         evalue          = config.get("blast_evalue", "1e-5"),
-#         max_target_seqs = config.get("blast_max_hits", 5),
-#         min_pident      = config.get("blast_min_pident", 80),
-#         min_qcov        = config.get("blast_min_qcov", 50),
-#         outfmt = "6 qseqid sseqid pident length qlen slen evalue bitscore staxids sscinames scomnames stitle"
-#     shell:
-#         """
-#         mkdir -p results/blast
-
-#         n_seqs=$(grep -c '^>' {input.fasta} || true)
-#         echo "Sequences to BLAST : $n_seqs" >> {log}
-
-#         if [ "$n_seqs" -eq 0 ]; then
-#             echo "No sequences to BLAST" >> {log}
-#             touch {output.results} {output.report} \
-#                   {output.filtered} {output.excluded}
-#             exit 0
-#         fi
-
-#         blastn \
-#             -query           {input.fasta} \
-#             -db              {input.db} \
-#             -out             {output.results} \
-#             -outfmt          "{params.outfmt}" \
-#             -evalue          {params.evalue} \
-#             -max_target_seqs {params.max_target_seqs} \
-#             -num_threads     {threads} \
-#             2>> {log}
-
-#         # Identifier les séquences à EXCLURE :
-#         # pident >= 80% AND (length / qlen * 100) >= 50%
-#         awk -F'\t' -v min_pid={params.min_pident} \
-#                    -v min_qcov={params.min_qcov} '
-#             {{
-#                 qseqid = $1
-#                 pident = $3
-#                 length = $4
-#                 qlen   = $5
-#                 qcov   = (qlen > 0) ? (length / qlen * 100) : 0
-
-#                 if (pident >= min_pid && qcov >= min_qcov) {{
-#                     excluded[qseqid] = 1
-#                 }}
-#             }}
-#             END {{
-#                 for (id in excluded)
-#                     print id
-#             }}
-#         ' {output.results} | sort -u \
-#             > /tmp/{wildcards.sample}_excluded_ids.txt
-
-#         echo "Sequences excluded (pident>={params.min_pident}% AND qcov>={params.min_qcov}%) : \
-# $(wc -l < /tmp/{wildcards.sample}_excluded_ids.txt)" >> {log}
-
-#         # Séquences FILTRÉES (pas de hit fort = candidates viraux)
-#         seqkit grep \
-#             -f /tmp/{wildcards.sample}_excluded_ids.txt \
-#             --invert-match \
-#             {input.fasta} \
-#             -o {output.filtered} \
-#             2>> {log}
-
-#         # Séquences EXCLUES (hit connu)
-#         seqkit grep \
-#             -f /tmp/{wildcards.sample}_excluded_ids.txt \
-#             {input.fasta} \
-#             -o {output.excluded} \
-#             2>> {log}
-
-#         # Résumé : meilleur hit par séquence + statut
-#         awk -F'\t' -v min_pid={params.min_pident} \
-#                    -v min_qcov={params.min_qcov} '
-#             BEGIN {{
-#                 OFS = "\t"
-#                 print "query", "best_hit", "pident", "qcov", \
-#                       "evalue", "taxid", "species", "status"
-#             }}
-#             !seen[$1]++ {{
-#                 qcov = ($5 > 0) ? ($4 / $5 * 100) : 0
-#                 status = ($3 >= min_pid && qcov >= min_qcov) \
-#                          ? "excluded" : "kept"
-#                 printf "%s\t%s\t%s\t%.1f\t%s\t%s\t%s\t%s\n", \
-#                        $1, $2, $3, qcov, $7, $9, $10, status
-#             }}
-#         ' {output.results} > {output.report}
-
-#         echo "Sequences kept    : $(grep -c 'kept'     {output.report} || true)" >> {log}
-#         echo "Sequences excluded: $(grep -c 'excluded' {output.report} || true)" >> {log}
-
-#         rm -f /tmp/{wildcards.sample}_excluded_ids.txt
-#         """

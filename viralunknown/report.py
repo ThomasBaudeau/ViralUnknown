@@ -6,6 +6,8 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
+from pathlib import Path
+from collections import defaultdict
 
 
 
@@ -239,6 +241,145 @@ def make_bar_comparison(samples, stats):
     )
     return fig.to_html(full_html=False, include_plotlyjs=False)
 
+def parse_sample(l):
+    sample_list=[]
+    part=l.split(',')
+    for n in part:
+        sample_list.append(n.split('__')[0])
+    return set(sample_list)
+
+
+def collect_blast_clusters(summary_path="results/mmseqs_blast/clusters_summary.tsv",samples=None):
+    
+    path = Path(summary_path)
+    if not path.exists() or path.stat().st_size == 0:
+        return {}
+
+    multi_sample = {}
+
+    with open(path) as f:
+        for line in f:
+            parts = line.strip().split("\t")
+            if len(parts) < 3:
+                continue
+            rep_id     = parts[0]
+            nb_membres = int(parts[1]) if parts[1].isdigit() else 0
+            l_sample=parse_sample(parts[2])
+            nb_samples = len(l_sample)
+            samples    = l_sample
+
+            # Garder uniquement clusters présents dans > 1 sample
+            if nb_samples > 1:
+                multi_sample[rep_id] = {
+                    "nb_membres": nb_membres,
+                    "nb_samples": nb_samples,
+                    "samples":    samples,
+                }
+
+    return multi_sample
+
+
+def make_cluster_table(multi_sample_clusters, all_samples):
+    """
+    Generates an HTML table showing which samples contain each cluster.
+    Rows = clusters sorted by nb_membres descending
+    Columns = samples
+    ✓ = present, empty = absent
+    """
+    if not multi_sample_clusters:
+        return "<p style='color:#64748b'>No shared clusters found across multiple samples.</p>"
+
+    # Trier par nb_membres décroissant
+    sorted_clusters = sorted(
+        multi_sample_clusters.items(),
+        key=lambda x: x[1]["nb_samples"],
+        reverse=True
+    )
+    sorted_samples = sorted(all_samples)
+
+    rows = []
+    for cluster_id, data in sorted_clusters:
+        samples_present = data["samples"]
+        nb_membres      = data["nb_membres"]
+        nb_samples      = data["nb_samples"]
+
+        cells = ""
+        for s in sorted_samples:
+            if s in samples_present:
+                cells += (
+                    "<td style='text-align:center;color:#34d399;"
+                    "font-size:1.2rem'>✓</td>"
+                )
+            else:
+                cells += "<td></td>"
+
+        # Raccourcir l'ID si trop long
+        display_id = cluster_id if len(cluster_id) <= 60 else cluster_id[:57] + "..."
+
+        rows.append(
+            f"<tr>"
+            f"<td style='font-family:monospace;font-size:0.75rem' "
+            f"title='{cluster_id}'>{display_id}</td>"
+            f"<td style='text-align:center'>"
+            f"<span style='background:#7c3aed;padding:2px 8px;"
+            f"border-radius:999px;font-size:0.8rem'>{nb_membres} reads</span>"
+            f"</td>"
+            f"<td style='text-align:center'>"
+            f"<span style='background:#1e40af;padding:2px 8px;"
+            f"border-radius:999px;font-size:0.8rem'>"
+            f"{nb_samples}/{len(sorted_samples)}</span>"
+            f"</td>"
+            f"{cells}"
+            f"</tr>"
+        )
+
+    headers = "".join(
+        f"<th style='writing-mode:vertical-rl;transform:rotate(180deg);"
+        f"padding:0.5rem 0.3rem;font-size:0.8rem;white-space:nowrap'>{s}</th>"
+        for s in sorted_samples
+    )
+
+    n_clusters = len(sorted_clusters)
+
+    return f"""
+    <div style="overflow-x:auto">
+    <p style="color:#94a3b8;font-size:0.85rem;margin-bottom:0.8rem">
+        Showing <strong style="color:#e2e8f0">{n_clusters}</strong>
+        clusters shared across ≥ 2 samples,
+        sorted by number of reads (descending).
+    </p>
+    <table style="width:100%;border-collapse:collapse;font-size:0.85rem">
+        <thead>
+            <tr style="background:#0f172a">
+                <th style="text-align:left;padding:0.6rem 1rem;min-width:200px">
+                    Cluster ID
+                </th>
+                <th style="padding:0.6rem 0.5rem;white-space:nowrap">
+                    Total reads
+                </th>
+                <th style="padding:0.6rem 0.5rem;white-space:nowrap">
+                    Samples
+                </th>
+                {headers}
+            </tr>
+        </thead>
+        <tbody>
+            {"".join(rows)}
+        </tbody>
+    </table>
+    </div>
+    <p style="color:#64748b;font-size:0.8rem;margin-top:0.5rem">
+        ✓ = cluster representative found in this sample after BLAST filtering.
+        <br>
+        <strong>Total reads</strong> = number of reads grouped in this cluster
+        across all samples.
+        <br>
+        <strong>Samples</strong> = number of samples containing this cluster /
+        total samples.
+    </p>
+    """
+
+
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -369,6 +510,9 @@ HTML_TEMPLATE = """
             font-size: 0.85rem;
             border-top: 1px solid #1e293b;
         }
+        table tbody tr:nth-child(even) td { background: #1a2942; }
+        table tbody tr:hover td { background: #243147; }
+        table tbody td { padding: 0.4rem 0.8rem; border-top: 1px solid #334155; }
     </style>
 </head>
 <body>
@@ -460,6 +604,18 @@ HTML_TEMPLATE = """
     </div>
     {% endfor %}
 
+   <h2>Cross-sample cluster analysis</h2>
+    <div class="chart-box">
+        <div class="grid-4" style="margin-bottom:1rem">
+            <div class="card">
+                <div class="label">Shared clusters</div>
+                <div class="value">{{ n_shared_clusters }}</div>
+                <div class="sub">found in ≥ 2 samples</div>
+            </div>
+        </div>
+        {{ cluster_table }}
+    </div>
+
 </main>
 
 <footer>
@@ -469,13 +625,16 @@ HTML_TEMPLATE = """
 </html>
 """
 
+
+
+
+
 def generate_report(config, output):
     from datetime import datetime
     from . import __version__
 
     samples, stats, cfg = collect_stats(config)
 
-    # Camemberts Kraken2
     kraken_pies = {
         s: make_kraken_pie(s, stats[s].get("taxa", {}))
         for s in samples
@@ -492,6 +651,15 @@ def generate_report(config, output):
     funnels   = {s: make_funnel_chart(s, stats[s]) for s in samples}
     bar_chart = make_bar_comparison(samples, stats)
 
+    # Cluster cross-sample table
+    multi_sample_clusters = collect_blast_clusters(
+        summary_path="results/mmseqs_blast/clusters_summary.tsv",
+        samples=samples
+    )
+    cluster_table = make_cluster_table(multi_sample_clusters, samples)
+    n_shared_clusters = len(multi_sample_clusters)
+
+
     template = Template(HTML_TEMPLATE)
     html = template.render(
         samples            = samples,
@@ -503,7 +671,9 @@ def generate_report(config, output):
         pct_unclassified   = pct_unclassified,
         bar_chart          = bar_chart,
         funnels            = funnels,
-        kraken_pies        = kraken_pies,      # ← vérifie que cette ligne est là
+        kraken_pies        = kraken_pies,
+        cluster_table      = cluster_table,
+        n_shared_clusters  = n_shared_clusters,
         date               = datetime.now().strftime("%d/%m/%Y %H:%M"),
         version            = __version__,
     )
