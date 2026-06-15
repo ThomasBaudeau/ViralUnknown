@@ -241,22 +241,38 @@ def make_bar_comparison(samples, stats):
     )
     return fig.to_html(full_html=False, include_plotlyjs=False)
 
-def parse_sample(l):
+def parse_sample(l,dic_seq):
     sample_list=[]
     part=l.split(',')
+    seqs=''
     for n in part:
+        id=n.split('\t')[0].strip('\n')
         sample_list.append(n.split('__')[0])
-    return set(sample_list)
+        seqs=seqs+'>'+id+'\n'+dic_seq[id]+'\n'
+    return set(sample_list),seqs
 
 
-def collect_blast_clusters(summary_path="results/mmseqs_blast/clusters_summary.tsv",samples=None):
+def collect_blast_clusters(summary_path="results/mmseqs_blast/clusters_summary.tsv",all_fasta="results/blast/all_merged_blast.fasta",samples=None):
     
     path = Path(summary_path)
     if not path.exists() or path.stat().st_size == 0:
         return {}
 
     multi_sample = {}
-
+    all_sequence={}
+    id=None
+    rep=''
+    with open(all_fasta) as fasta:
+        for line in fasta:
+            if line[0]=='>':
+                if id!=None:
+                    all_sequence[id]=rep.replace('\n','')
+                    id=None
+                    rep=''
+                id=line.split('\t')[0].strip('\n')[1:].strip(' ')
+            else:
+                rep=rep+line
+        all_sequence[id]=rep.replace('\n','')
     with open(path) as f:
         for line in f:
             parts = line.strip().split("\t")
@@ -264,9 +280,10 @@ def collect_blast_clusters(summary_path="results/mmseqs_blast/clusters_summary.t
                 continue
             rep_id     = parts[0]
             nb_membres = int(parts[1]) if parts[1].isdigit() else 0
-            l_sample=parse_sample(parts[2])
+            l_sample,seqs=parse_sample(parts[2],all_sequence)
             nb_samples = len(l_sample)
             samples    = l_sample
+            
 
             # Garder uniquement clusters présents dans > 1 sample
             if nb_samples > 1:
@@ -274,68 +291,133 @@ def collect_blast_clusters(summary_path="results/mmseqs_blast/clusters_summary.t
                     "nb_membres": nb_membres,
                     "nb_samples": nb_samples,
                     "samples":    samples,
+                    "seqs":       seqs,
                 }
 
     return multi_sample
 
 
+import json
+
+
 def make_cluster_table(multi_sample_clusters, all_samples):
     """
     Generates an HTML table showing which samples contain each cluster.
-    Rows = clusters sorted by nb_membres descending
-    Columns = samples
-    ✓ = present, empty = absent
+
+    Added:
+      - Copy FASTA button (representative sequence)
+      - Copy Cluster button (all FASTA sequences in cluster)
+
+    IMPORTANT:
+      Replace the two variables below with your actual FASTA strings:
+        single_fasta_to_copy
+        cluster_fastas_to_copy
     """
+
     if not multi_sample_clusters:
         return "<p style='color:#64748b'>No shared clusters found across multiple samples.</p>"
 
-    # Trier par nb_membres décroissant
     sorted_clusters = sorted(
         multi_sample_clusters.items(),
         key=lambda x: x[1]["nb_samples"],
         reverse=True
     )
+
     sorted_samples = sorted(all_samples)
 
     rows = []
+
     for cluster_id, data in sorted_clusters:
+
         samples_present = data["samples"]
-        nb_membres      = data["nb_membres"]
-        nb_samples      = data["nb_samples"]
+        nb_membres = data["nb_membres"]
+        nb_samples = data["nb_samples"]
+        sequence=data["seqs"]
+
+        # =====================================================
+        # TODO: BRANCHER TES VRAIES SÉQUENCES FASTA ICI
+        # =====================================================
+
+        # FASTA représentative du cluster
+        single_fasta_to_copy = '\n'.join(sequence.split('\n')[0:2])
+
+        # Toutes les FASTA du cluster
+        cluster_fastas_to_copy = sequence
+
+        # =====================================================
+
+        single_fasta_js = json.dumps(single_fasta_to_copy)
+        cluster_fastas_js = json.dumps(cluster_fastas_to_copy)
 
         cells = ""
         for s in sorted_samples:
             if s in samples_present:
                 cells += (
-                    "<td style='text-align:center;color:#34d399;"
-                    "font-size:1.2rem'>✓</td>"
+                    "<td style='text-align:center;"
+                    "color:#34d399;font-size:1.2rem'>✓</td>"
                 )
             else:
                 cells += "<td></td>"
 
-        # Raccourcir l'ID si trop long
-        display_id = cluster_id if len(cluster_id) <= 60 else cluster_id[:57] + "..."
+        display_id = (
+            cluster_id
+            if len(cluster_id) <= 60
+            else cluster_id[:57] + "..."
+        )
 
         rows.append(
             f"<tr>"
+
             f"<td style='font-family:monospace;font-size:0.75rem' "
-            f"title='{cluster_id}'>{display_id}</td>"
+            f"title='{cluster_id}'>"
+            f"{display_id}"
+            f"</td>"
+
             f"<td style='text-align:center'>"
             f"<span style='background:#7c3aed;padding:2px 8px;"
-            f"border-radius:999px;font-size:0.8rem'>{nb_membres} reads</span>"
+            f"border-radius:999px;font-size:0.8rem'>"
+            f"{nb_membres} reads"
+            f"</span>"
             f"</td>"
+
             f"<td style='text-align:center'>"
             f"<span style='background:#1e40af;padding:2px 8px;"
             f"border-radius:999px;font-size:0.8rem'>"
-            f"{nb_samples}/{len(sorted_samples)}</span>"
+            f"{nb_samples}/{len(sorted_samples)}"
+            f"</span>"
             f"</td>"
+
+            f"<td style='text-align:center'>"
+            f"<button "
+            f"onclick='navigator.clipboard.writeText({single_fasta_js})' "
+            f"style='background:#059669;color:white;border:none;"
+            f"border-radius:6px;padding:4px 8px;cursor:pointer;"
+            f"font-size:0.8rem'>"
+            f"📋 FASTA"
+            f"</button>"
+            f"</td>"
+
+            f"<td style='text-align:center'>"
+            f"<button "
+            f"onclick='navigator.clipboard.writeText({cluster_fastas_js})' "
+            f"style='background:#2563eb;color:white;border:none;"
+            f"border-radius:6px;padding:4px 8px;cursor:pointer;"
+            f"font-size:0.8rem'>"
+            f"📋 Cluster"
+            f"</button>"
+            f"</td>"
+
             f"{cells}"
+
             f"</tr>"
         )
 
     headers = "".join(
-        f"<th style='writing-mode:vertical-rl;transform:rotate(180deg);"
-        f"padding:0.5rem 0.3rem;font-size:0.8rem;white-space:nowrap'>{s}</th>"
+        f"<th style='writing-mode:vertical-rl;"
+        f"transform:rotate(180deg);"
+        f"padding:0.5rem 0.3rem;"
+        f"font-size:0.8rem;"
+        f"white-space:nowrap'>{s}</th>"
         for s in sorted_samples
     )
 
@@ -343,31 +425,51 @@ def make_cluster_table(multi_sample_clusters, all_samples):
 
     return f"""
     <div style="overflow-x:auto">
+
     <p style="color:#94a3b8;font-size:0.85rem;margin-bottom:0.8rem">
         Showing <strong style="color:#e2e8f0">{n_clusters}</strong>
         clusters shared across ≥ 2 samples,
         sorted by number of reads (descending).
     </p>
+
     <table style="width:100%;border-collapse:collapse;font-size:0.85rem">
+
         <thead>
             <tr style="background:#0f172a">
+
                 <th style="text-align:left;padding:0.6rem 1rem;min-width:200px">
                     Cluster ID
                 </th>
+
                 <th style="padding:0.6rem 0.5rem;white-space:nowrap">
                     Total reads
                 </th>
+
                 <th style="padding:0.6rem 0.5rem;white-space:nowrap">
                     Samples
                 </th>
+
+                <th style="padding:0.6rem 0.5rem;white-space:nowrap">
+                    Copy FASTA
+                </th>
+
+                <th style="padding:0.6rem 0.5rem;white-space:nowrap">
+                    Copy Cluster
+                </th>
+
                 {headers}
+
             </tr>
         </thead>
+
         <tbody>
             {"".join(rows)}
         </tbody>
+
     </table>
+
     </div>
+
     <p style="color:#64748b;font-size:0.8rem;margin-top:0.5rem">
         ✓ = cluster representative found in this sample after BLAST filtering.
         <br>
@@ -628,7 +730,6 @@ HTML_TEMPLATE = """
 
 
 
-
 def generate_report(config, output):
     from datetime import datetime
     from . import __version__
@@ -654,6 +755,7 @@ def generate_report(config, output):
     # Cluster cross-sample table
     multi_sample_clusters = collect_blast_clusters(
         summary_path="results/mmseqs_blast/clusters_summary.tsv",
+        all_fasta="results/blast/all_merged_blast.fasta",
         samples=samples
     )
     cluster_table = make_cluster_table(multi_sample_clusters, samples)

@@ -14,7 +14,7 @@ rule all:
         # expand("results/quality_filter/{sample}_not_mapped_highQ.fastq", sample=SAMPLES),
         # expand("results/quality_filter/{sample}_not_mapped_lowQ.fastq",  sample=SAMPLES),
         expand("results/fastqc/{sample}_not_mapped_fastqc.html",  sample=SAMPLES),
-        # expand("results/stats/{sample}_raw_stats.txt", sample=SAMPLES),
+        expand("results/stats/{sample}_raw_stats.txt", sample=SAMPLES),
         expand("results/blast/{sample}_candidates_filtered.fasta", sample=SAMPLES),
         # expand("results/blast/{sample}_candidates_excluded.fasta", sample=SAMPLES),
         # expand("results/blast/{sample}_blast_summary.tsv",         sample=SAMPLES),
@@ -250,7 +250,8 @@ rule extract_unclassified:
 
 rule metaflye_assembly:
     input:
-        reads = "results/unclassified/{sample}.fastq"
+        reads = "results/unclassified/{sample}.fastq",
+        todo= "results/non_human/{sample}.fastq"
     output:
         assembly = temp("results/metaflye/{sample}/assembly.fasta")
     log:
@@ -756,7 +757,6 @@ rule mmseqs_blast_cluster:
         awk '
             BEGIN {{
                 OFS = "\t"
-                print "representant", "nb_membres", "membres"
             }}
             {{
                 rep = $1
@@ -781,6 +781,8 @@ rule generate_report:
     input:
         expand("results/mmseqs/{sample}/clusters_rep_seq.fasta", sample=SAMPLES),
         expand("results/fastqc/{sample}_not_mapped_fastqc.html", sample=SAMPLES),
+        expand("results/stats/{sample}_raw_stats.txt", sample=SAMPLES),
+        "results/mmseqs_blast/clusters_rep_seq.fasta",
     output:
         "results/report.html"
     log:
